@@ -294,11 +294,12 @@ const Users = () => {
       notify("User added successfully");
 
       // RESET FORM
-      setNewUser({
-        username: "",
-        password: "",
-        role: ""
-      });
+      // setNewUser({
+      //   username: "",
+      //   password: "",
+      //   role: ""
+      // });
+      resetUserForm();
 
       setShowAddPanel(false);
 
@@ -589,6 +590,7 @@ const Users = () => {
               <div className="um-field um-role-field">
                 <label>Role</label>
                 <Select
+                  key={newUser.role || "empty-role"}
                   className="um-react-select"
                   classNamePrefix="um-react"
                   options={roleOptions}

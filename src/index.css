@@ -261,7 +261,7 @@ body {
   display: block;
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-secondary);
+  color: #e9e6e6;
   margin-bottom: 6px;
 }
 
@@ -568,7 +568,7 @@ body {
 
 .sidebar-user-role {
   font-size: 11px;
-  color: var(--text-muted);
+  color: #d1d4d9;
 }
 
 .sidebar-logout {
@@ -794,7 +794,7 @@ body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.6px;
-  color: var(--text-muted);
+  color: #e9e6e6;
 }
 
 .db-stat-value {
@@ -811,7 +811,7 @@ body {
 
 .db-stat-sub {
   font-size: 11px;
-  color: var(--text-secondary);
+  color: #d1d4d9;
   margin-top: 2px;
 }
 
@@ -884,7 +884,7 @@ body {
 
 .db-action-desc {
   font-size: 12px;
-  color: var(--text-secondary);
+  color: #d1d4d9;
 }
 
 .db-action-arrow {
@@ -1018,7 +1018,7 @@ body {
 
 .um-stat-label {
   font-size: 12px;
-  color: var(--text-secondary);
+  color: #e9e6e6;
 }
 
 .um-stat-total  { border-color: rgba(224,101,128,0.3); }
@@ -1084,7 +1084,7 @@ body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.6px;
-  color: var(--text-muted);
+  color: #e9e6e6;
   margin-bottom: 6px;
 }
 
@@ -1155,7 +1155,7 @@ body {
   background: transparent;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--text-secondary);
+  color: #e9e6e6;
   font-size: 13px;
   font-family: var(--font);
   cursor: pointer;
@@ -1289,7 +1289,7 @@ body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.7px;
-  color: var(--text-muted);
+  color: #d1d4d9;
   background: rgba(15,17,23,0.5);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
@@ -1649,7 +1649,7 @@ body {
 }
 .lib-header-text p {
   font-size: 13px;
-  color: var(--text-muted);
+  color: #d1d4d9;
   margin: 0;
 }
 .lib-header-actions {
@@ -1737,7 +1737,7 @@ body {
 .lib-search-clear:hover { color: var(--text-primary); }
 .lib-results-count {
   font-size: 12px;
-  color: var(--text-muted);
+  color: #d1d4d9;
   white-space: nowrap;
 }
 
@@ -1781,7 +1781,7 @@ body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-muted);
+  color: #d1d4d9;
   background: rgba(255,255,255,0.03);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
@@ -3578,4 +3578,12 @@ body {
 
 .um-password-toggle:hover {
   color: #fff;
+}
+
+.login-copyright {
+  margin-top: 18px;
+  text-align: center;
+  font-size: 12px;
+  color: #e9e6e6;
+  letter-spacing: 0.4px;
 }

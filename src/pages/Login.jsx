@@ -203,6 +203,10 @@ const Login = () => {
             "Sign In"
           )}
         </button>
+        {/* Copyright */}
+        <div className="login-copyright">
+          © {new Date().getFullYear()} BeyondeBiz Consulting Pvt. Ltd. All rights reserved.
+        </div>
       </form>
     </div>
   );
