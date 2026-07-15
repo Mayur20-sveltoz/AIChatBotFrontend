@@ -1,14 +1,39 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import axios from "axios";
 import API_BASE_URL from "../apiroute/apiConfig";
 import BBLogo from "../assets/BBizLogo1.png";
+import { useNavigate } from "react-router-dom";
 
 const Login = () => {
+  const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+
+  useEffect(() => {
+    const token =
+      sessionStorage.getItem("token");
+
+    const role =
+      sessionStorage.getItem("role");
+
+    /*
+     * User already logged in असेल आणि browser Back
+     * करून login page वर आला, तर login page दाखवू नका.
+     */
+    if (token) {
+      navigate(
+        role === "Admin"
+          ? "/dashboard"
+          : "/chatbot",
+        {
+          replace: true,
+        }
+      );
+    }
+  }, [navigate]);
 
   const login = async (e) => {
     e.preventDefault();
@@ -35,11 +60,15 @@ const Login = () => {
         sessionStorage.setItem("token", res.data.token);
       }
 
-      if (res.data.role === "Admin") {
-        window.location.href = "/dashboard";
-      } else {
-        window.location.href = "/chatbot";
-      }
+      navigate(
+        res.data.role === "Admin"
+          ? "/dashboard"
+          : "/chatbot",
+        {
+          replace: true,
+        }
+      );
+      
     } catch (err) {
       console.log(err);
       setError(

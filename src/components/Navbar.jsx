@@ -113,8 +113,11 @@ const Navbar = ({ user }) => {
   const isActive = (path) => location.pathname === path;
 
   const logout = () => {
-    sessionStorage.clear();
-    navigate("/login");
+  sessionStorage.clear();
+
+    navigate("/login", {
+      replace: true,
+    });
   };
 
   const handleUploadPdfClick = () => {

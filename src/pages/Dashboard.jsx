@@ -3,6 +3,7 @@ import { useNavigate, Navigate } from "react-router-dom";
 import axios from "axios";
 import API_BASE_URL from "../apiroute/apiConfig";
 
+
 const Dashboard = () => {
   const username = sessionStorage.getItem("username");
   const role = sessionStorage.getItem("role");
@@ -11,12 +12,61 @@ const Dashboard = () => {
   const [userCount, setUserCount] = useState(null);
   const [pdfCount, setPdfCount] = useState(null);
 
-  if (role !== "Admin") {
-    return <Navigate to="/chatbot" />;
-  }
+  useEffect(() => {
+    const token = sessionStorage.getItem("token");
+
+    if (!token) {
+      navigate("/", {
+        replace: true,
+      });
+
+      return;
+    }
+
+    const currentUrl =
+      window.location.pathname +
+      window.location.search +
+      window.location.hash;
+
+    window.history.pushState(
+      { navigationBlocked: true },
+      "",
+      currentUrl
+    );
+
+    const handlePopState = () => {
+      window.history.pushState(
+        { navigationBlocked: true },
+        "",
+        currentUrl
+      );
+    };
+
+    window.addEventListener(
+      "popstate",
+      handlePopState
+    );
+
+    return () => {
+      window.removeEventListener(
+        "popstate",
+        handlePopState
+      );
+    };
+  }, [navigate]);
+
+ 
 
   useEffect(() => {
     const token = sessionStorage.getItem("token");
+    if (!token) {
+      navigate("/", {
+        replace: true,
+      });
+
+      return;
+    }
+
     const headers = { Authorization: `Bearer ${token}` };
 
     axios.get(`${API_BASE_URL}/api/AdminAPI/Users`, { headers })
@@ -30,8 +80,10 @@ const Dashboard = () => {
         setPdfCount(count);
       })
       .catch(() => setPdfCount("—"));
-  }, []);
-
+  }, [navigate]);
+   if (role !== "Admin") {
+    return <Navigate to="/chatbot" />;
+  }
   const greeting = () => {
     const h = new Date().getHours();
     if (h < 12) return "Good morning";

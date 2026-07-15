@@ -3587,3 +3587,45 @@ body {
   color: #e9e6e6;
   letter-spacing: 0.4px;
 }
+
+.pdf-highlight-loader {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(148, 163, 184, 0.25);
+  border-top-color: #e85d8a;
+  border-radius: 50%;
+  animation: pdf-highlight-spin 0.75s linear infinite;
+}
+
+@keyframes pdf-highlight-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.rpv-core__text-layer span[data-pdf-highlight="true"] {
+  background-color: rgba(255, 255, 0, 0.55) !important;
+  background: rgba(255, 255, 0, 0.55) !important;
+
+  color: transparent !important;
+
+  opacity: 1 !important;
+  mix-blend-mode: normal !important;
+  filter: none !important;
+  text-shadow: none !important;
+
+  padding: 0 !important;
+  border-radius: 2px !important;
+}
+.chatbot-result-pdf .rpv-core__text-layer {
+  opacity: 1 !important;
+  mix-blend-mode: normal !important;
+}
+
+.chatbot-result-pdf .rpv-core__text-layer span {
+  mix-blend-mode: normal !important;
+}

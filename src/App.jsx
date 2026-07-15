@@ -5,8 +5,17 @@ import Users from "./pages/Users";
 import Chatbot from "./pages/Chatbot";
 import Login from "./pages/Login";
 import UploadedPdfs from "./pages/UploadedPdfs";
+import useBlockBrowserNavigation from "./hooks/useBlockBrowserNavigation";
+
 
 function App() {
+  const token =
+    sessionStorage.getItem("token");
+
+  useBlockBrowserNavigation(
+    Boolean(token)
+  );
+
   return (
     <BrowserRouter>
       <Routes>

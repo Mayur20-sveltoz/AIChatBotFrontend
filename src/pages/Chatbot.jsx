@@ -2,16 +2,20 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { askQuestion, getPdf, getChatHistory } from "../apiroute/chatbotApi";
 import { Worker, Viewer } from '@react-pdf-viewer/core';
 import { defaultLayoutPlugin } from '@react-pdf-viewer/default-layout';
-//import { highlightPlugin } from '@react-pdf-viewer/highlight';
 import { pageNavigationPlugin } from '@react-pdf-viewer/page-navigation';
 
 
 import '@react-pdf-viewer/core/lib/styles/index.css';
 import '@react-pdf-viewer/default-layout/lib/styles/index.css';
-//import '@react-pdf-viewer/highlight/lib/styles/index.css';
 
-const wait = (milliseconds) =>
-  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+// const wait = (milliseconds) =>
+//   new Promise((resolve) => setTimeout(resolve, milliseconds));
+const nextAnimationFrame = () =>
+  new Promise((resolve) => {
+    window.requestAnimationFrame(resolve);
+  });
+
 
 const normalizePdfText = (value = "") => {
   return String(value)
@@ -36,45 +40,217 @@ const buildHighlightPhrases = (value = "") => {
     ? value.join("\n")
     : String(value || "");
 
-  const prepared = source
+  const cleanedSource = source
     .replace(/Source:\s*[\s\S]*$/i, "")
-    .replace(/^\s*(Answer|Steps)\s*:?\s*/i, "")
     .replace(/\r/g, "\n")
-    .replace(/(^|\s)\d+\s*[.)]\s+/g, "\n")
-    .replace(/(^|\n)\s*[-*•]\s+/g, "\n")
-    .replace(/[.!?;]+(?=\s|$)/g, "$&\n");
+    .replace(/^\s*Answer\s*:?\s*/i, "")
+    .replace(/^\s*Steps\s*:?\s*/im, "")
+    .trim();
 
-  const phrases = new Set();
+  if (!cleanedSource) {
+    return [];
+  }
 
-  prepared
+  const phraseMap = new Map();
+
+  const addPhrase = (
+    originalText,
+    type = "sentence",
+    priority = 1
+  ) => {
+    const normalizedText =
+      normalizePdfText(originalText);
+
+    const tokens =
+      tokenizePdfText(originalText);
+
+    if (
+      !normalizedText ||
+      tokens.length < 2 ||
+      normalizedText.length < 6
+    ) {
+      return;
+    }
+
+    const existing =
+      phraseMap.get(normalizedText);
+
+    if (
+      !existing ||
+      priority > existing.priority
+    ) {
+      phraseMap.set(normalizedText, {
+        text: normalizedText,
+        originalText:
+          String(originalText || "").trim(),
+        tokens,
+        type,
+        priority,
+      });
+    }
+  };
+
+  /*
+   * 1. Numbered steps:
+   * 1.
+   * 2)
+   * 10.
+   */
+  const numberedStepPattern =
+    /(?:^|\n)\s*\d+\s*[.)]\s*([\s\S]*?)(?=(?:\n\s*\d+\s*[.)]\s*)|$)/g;
+
+  let numberedStepMatch;
+  let numberedStepsFound = false;
+
+  while (
+    (
+      numberedStepMatch =
+      numberedStepPattern.exec(
+        cleanedSource
+      )
+    ) !== null
+  ) {
+    const stepText =
+      numberedStepMatch[1]?.trim();
+
+    if (!stepText) {
+      continue;
+    }
+
+    numberedStepsFound = true;
+
+    addPhrase(
+      stepText,
+      "numbered-step",
+      6
+    );
+  }
+
+  /*
+   * 2. Bullet points.
+   */
+  cleanedSource
     .split(/\n+/)
-    .map((part) => normalizePdfText(part))
+    .map((line) =>
+      line
+        .replace(
+          /^\s*[-*•]\s*/,
+          ""
+        )
+        .trim()
+    )
     .filter(Boolean)
-    .forEach((phrase) => {
-      const words = phrase.split(" ").filter(Boolean);
+    .forEach((line) => {
+      addPhrase(
+        line,
+        "line",
+        4
+      );
+    });
 
-      if (words.length < 3 || phrase.length < 12) {
+  /*
+   * 3. Sentence-level phrases.
+   */
+  cleanedSource
+    .replace(
+      /(?:^|\n)\s*\d+\s*[.)]\s*/g,
+      "\n"
+    )
+    .split(
+      /(?<=[.!?;])\s+|\n+/
+    )
+    .map((sentence) =>
+      sentence.trim()
+    )
+    .filter(Boolean)
+    .forEach((sentence) => {
+      addPhrase(
+        sentence,
+        "sentence",
+        numberedStepsFound ? 3 : 5
+      );
+    });
+
+  /*
+   * 4. For long phrases, create overlapping windows.
+   */
+  Array.from(phraseMap.values())
+    .forEach((phraseObject) => {
+      const words =
+        phraseObject.tokens;
+
+      if (words.length <= 20) {
         return;
       }
 
-      if (words.length > 24) {
-        for (let start = 0; start < words.length; start += 10) {
-          const windowWords = words.slice(start, start + 16);
+      for (
+        let start = 0;
+        start < words.length;
+        start += 8
+      ) {
+        const windowWords =
+          words.slice(
+            start,
+            start + 14
+          );
 
-          if (windowWords.length >= 5) {
-            phrases.add(windowWords.join(" "));
-          }
-
-          if (start + 16 >= words.length) {
-            break;
-          }
+        if (
+          windowWords.length >= 5
+        ) {
+          addPhrase(
+            windowWords.join(" "),
+            "window",
+            2
+          );
         }
-      } else {
-        phrases.add(phrase);
+
+        if (
+          start + 14 >=
+          words.length
+        ) {
+          break;
+        }
       }
     });
 
-  return Array.from(phrases).slice(0, 12);
+  /*
+   * 5. Extract useful identifiers:
+   * 202.12
+   * ABC-123
+   * Error 45
+   * Model X500
+   * page 89
+   */
+  const identifierMatches =
+    cleanedSource.match(
+      /\b(?:[a-z]+\d+[a-z0-9.-]*|\d+[a-z]+[a-z0-9.-]*|\d+(?:[.-]\d+)+)\b/gi
+    ) || [];
+
+  identifierMatches.forEach(
+    (identifier) => {
+      addPhrase(
+        identifier,
+        "identifier",
+        10
+      );
+    }
+  );
+
+  /*
+   * Maximum 80 phrases so long answers are supported,
+   * but matching remains controlled.
+   */
+  return Array.from(
+    phraseMap.values()
+  )
+    .sort(
+      (left, right) =>
+        right.priority -
+        left.priority ||
+        right.tokens.length -
+        left.tokens.length
+    )
+    .slice(0, 80);
 };
 
 const getTokenOverlap = (sourceTokens, targetTokens) => {
@@ -149,6 +325,158 @@ const getOrderedCoverage = (sourceTokens, targetTokens) => {
   return dp[targetTokens.length] / sourceTokens.length;
 };
 
+const COMMON_PDF_WORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "to",
+  "of",
+  "in",
+  "on",
+  "for",
+  "from",
+  "with",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "this",
+  "that",
+  "then",
+  "if",
+  "you",
+  "your",
+  "it",
+  "as",
+  "at",
+  "by",
+  "go",
+  "step",
+  "page",
+  "see",
+]);
+
+const isIdentifierToken = (token = "") => {
+  return (
+    /\d/.test(token) ||
+    (
+      /[a-z]/i.test(token) &&
+      token.length >= 8
+    )
+  );
+};
+
+const getTokenWeight = (token = "") => {
+  if (!token) {
+    return 0;
+  }
+
+  if (/^\d+$/.test(token)) {
+    return 3;
+  }
+
+  if (
+    /\d/.test(token) &&
+    /[a-z]/i.test(token)
+  ) {
+    return 4;
+  }
+
+  if (
+    COMMON_PDF_WORDS.has(token)
+  ) {
+    return 0.35;
+  }
+
+  if (token.length >= 10) {
+    return 2;
+  }
+
+  if (token.length >= 6) {
+    return 1.5;
+  }
+
+  return 1;
+};
+
+const getWeightedCoverage = (
+  sourceTokens,
+  targetTokens
+) => {
+  const targetCounts = new Map();
+
+  targetTokens.forEach((token) => {
+    targetCounts.set(
+      token,
+      (targetCounts.get(token) || 0) + 1
+    );
+  });
+
+  let totalWeight = 0;
+  let matchedWeight = 0;
+  let matchedTokens = 0;
+
+  sourceTokens.forEach((token) => {
+    const weight =
+      getTokenWeight(token);
+
+    totalWeight += weight;
+
+    const available =
+      targetCounts.get(token) || 0;
+
+    if (available > 0) {
+      matchedWeight += weight;
+      matchedTokens += 1;
+
+      targetCounts.set(
+        token,
+        available - 1
+      );
+    }
+  });
+
+  return {
+    matchedTokens,
+    weightedCoverage:
+      totalWeight > 0
+        ? matchedWeight /
+        totalWeight
+        : 0,
+  };
+};
+
+const getIdentifierCoverage = (
+  sourceTokens,
+  targetTokens
+) => {
+  const identifiers =
+    sourceTokens.filter(
+      isIdentifierToken
+    );
+
+  if (!identifiers.length) {
+    return 1;
+  }
+
+  const matchedIdentifiers =
+    identifiers.filter(
+      (identifier) =>
+        targetTokens.includes(
+          identifier
+        )
+    );
+
+  return (
+    matchedIdentifiers.length /
+    identifiers.length
+  );
+};
+
 const findExactTokenRange = (pageValues, phraseTokens) => {
   if (
     !phraseTokens.length ||
@@ -191,55 +519,131 @@ const findExactTokenRange = (pageValues, phraseTokens) => {
   return null;
 };
 
-const findBestTokenRange = (pageTokens, phrase) => {
-  const phraseTokens = tokenizePdfText(phrase);
-  const pageValues = pageTokens.map((item) => item.value);
+const findBestTokenRange = (
+  pageTokens,
+  phraseInput
+) => {
+  const phraseObject =
+    typeof phraseInput === "string"
+      ? {
+        text: phraseInput,
+        tokens:
+          tokenizePdfText(
+            phraseInput
+          ),
+        type: "sentence",
+        priority: 1,
+      }
+      : phraseInput;
 
-  if (phraseTokens.length < 3 || pageValues.length < 3) {
+  const phraseTokens =
+    phraseObject.tokens ||
+    tokenizePdfText(
+      phraseObject.text || ""
+    );
+
+  const pageValues =
+    pageTokens.map(
+      (item) => item.value
+    );
+
+  if (
+    !phraseTokens.length ||
+    !pageValues.length
+  ) {
     return null;
   }
 
-  const exactMatch = findExactTokenRange(
-    pageValues,
-    phraseTokens
-  );
+  /*
+   * Exact match always wins.
+   */
+  const exactMatch =
+    findExactTokenRange(
+      pageValues,
+      phraseTokens
+    );
 
   if (exactMatch) {
-    return exactMatch;
+    return {
+      ...exactMatch,
+      matchType: "exact",
+      priority:
+        phraseObject.priority || 1,
+    };
   }
 
-  const phraseLength = phraseTokens.length;
-  const phraseTokenSet = new Set(phraseTokens);
+  /*
+   * Very short phrases are dangerous unless
+   * they contain an identifier.
+   */
+  if (
+    phraseTokens.length <= 2 &&
+    !phraseTokens.some(
+      isIdentifierToken
+    )
+  ) {
+    return null;
+  }
 
-  const minimumWindowLength = Math.max(
-    3,
-    phraseLength - 4
-  );
+  const phraseLength =
+    phraseTokens.length;
 
-  const maximumWindowLength = Math.min(
-    pageValues.length,
-    phraseLength + 8
-  );
+  const phraseSet =
+    new Set(phraseTokens);
+
+  const minimumWindowLength =
+    Math.max(
+      2,
+      phraseLength - 7
+    );
+
+  const maximumWindowLength =
+    Math.min(
+      pageValues.length,
+      phraseLength + 14
+    );
 
   let bestMatch = null;
 
-  for (let start = 0; start < pageValues.length; start++) {
-    if (!phraseTokenSet.has(pageValues[start])) {
+  for (
+    let start = 0;
+    start < pageValues.length;
+    start++
+  ) {
+    /*
+     * At least one phrase token should appear
+     * at the beginning of the candidate region.
+     */
+    if (
+      !phraseSet.has(
+        pageValues[start]
+      )
+    ) {
       continue;
     }
 
     for (
-      let windowLength = minimumWindowLength;
-      windowLength <= maximumWindowLength;
+      let windowLength =
+        minimumWindowLength;
+      windowLength <=
+      maximumWindowLength;
       windowLength++
     ) {
-      const end = start + windowLength;
+      const end =
+        start + windowLength;
 
-      if (end > pageValues.length) {
+      if (
+        end >
+        pageValues.length
+      ) {
         break;
       }
 
-      const windowTokens = pageValues.slice(start, end);
+      const windowTokens =
+        pageValues.slice(
+          start,
+          end
+        );
 
       const {
         matches,
@@ -250,45 +654,107 @@ const findBestTokenRange = (pageTokens, phrase) => {
         windowTokens
       );
 
-      const minimumMatches =
-        phraseLength <= 5
-          ? 3
-          : Math.max(
-              4,
-              Math.ceil(phraseLength * 0.5)
-            );
+      const orderedCoverage =
+        getOrderedCoverage(
+          phraseTokens,
+          windowTokens
+        );
 
-      if (matches < minimumMatches) {
-        continue;
-      }
-
-      const orderedCoverage = getOrderedCoverage(
+      const {
+        weightedCoverage,
+      } = getWeightedCoverage(
         phraseTokens,
         windowTokens
       );
 
-      const score =
-        orderedCoverage * 0.55 +
-        coverage * 0.3 +
-        precision * 0.15;
+      const identifierCoverage =
+        getIdentifierCoverage(
+          phraseTokens,
+          windowTokens
+        );
 
+      const lengthSimilarity =
+        Math.min(
+          phraseTokens.length,
+          windowTokens.length
+        ) /
+        Math.max(
+          phraseTokens.length,
+          windowTokens.length
+        );
+
+      const score =
+        weightedCoverage * 0.32 +
+        orderedCoverage * 0.28 +
+        coverage * 0.14 +
+        precision * 0.08 +
+        identifierCoverage * 0.13 +
+        lengthSimilarity * 0.05;
+
+      const hasIdentifiers =
+        phraseTokens.some(
+          isIdentifierToken
+        );
+
+      const minimumMatches =
+        phraseLength <= 4
+          ? Math.min(
+            2,
+            phraseLength
+          )
+          : Math.max(
+            3,
+            Math.ceil(
+              phraseLength * 0.35
+            )
+          );
+
+      /*
+       * Generic acceptance rules.
+       */
       const accepted =
-        phraseLength <= 5
-          ? coverage >= 0.8 &&
-            orderedCoverage >= 0.75
-          : coverage >= 0.62 &&
-            orderedCoverage >= 0.58 &&
-            score >= 0.67;
+        matches >= minimumMatches &&
+        weightedCoverage >=
+        (
+          hasIdentifiers
+            ? 0.48
+            : 0.56
+        ) &&
+        orderedCoverage >=
+        (
+          phraseLength <= 5
+            ? 0.5
+            : 0.38
+        ) &&
+        score >=
+        (
+          hasIdentifiers
+            ? 0.55
+            : 0.6
+        ) &&
+        (
+          !hasIdentifiers ||
+          identifierCoverage >= 0.65
+        );
 
       if (
         accepted &&
-        (!bestMatch || score > bestMatch.score)
+        (
+          !bestMatch ||
+          score >
+          bestMatch.score
+        )
       ) {
         bestMatch = {
           start,
           end: end - 1,
           score,
           exact: false,
+          matchType: "fuzzy",
+          identifierCoverage,
+          weightedCoverage,
+          priority:
+            phraseObject.priority || 1,
         };
       }
     }
@@ -297,73 +763,243 @@ const findBestTokenRange = (pageTokens, phrase) => {
   return bestMatch;
 };
 
-const highlightMatchingSpans = (spans, phrases) => {
+const highlightMatchingSpans = (
+  spans,
+  phrases
+) => {
   const pageTokens = [];
 
-  spans.forEach((span, spanIndex) => {
-    const tokens = tokenizePdfText(
-      span.textContent || ""
-    );
+  spans.forEach(
+    (span, spanIndex) => {
+      const tokens =
+        tokenizePdfText(
+          span.textContent || ""
+        );
 
-    tokens.forEach((token) => {
-      pageTokens.push({
-        value: token,
-        span,
-        spanIndex,
+      tokens.forEach((token) => {
+        pageTokens.push({
+          value: token,
+          span,
+          spanIndex,
+        });
       });
-    });
-  });
+    }
+  );
 
   if (!pageTokens.length) {
     return {
       matched: false,
       firstElement: null,
+      matchCount: 0,
     };
   }
 
-  const highlightedSpans = new Set();
-  let firstElement = null;
+  const candidateMatches = [];
 
   phrases.forEach((phrase) => {
-    const range = findBestTokenRange(
-      pageTokens,
-      phrase
-    );
+    const range =
+      findBestTokenRange(
+        pageTokens,
+        phrase
+      );
 
     if (!range) {
       return;
     }
 
-    for (
-      let tokenIndex = range.start;
-      tokenIndex <= range.end;
-      tokenIndex++
-    ) {
-      const span = pageTokens[tokenIndex]?.span;
+    candidateMatches.push({
+      ...range,
+      phrase,
+    });
+  });
 
-      if (span) {
-        highlightedSpans.add(span);
+  /*
+   * Best and most-specific matches first.
+   */
+  candidateMatches.sort(
+    (left, right) => {
+      const leftLength =
+        left.end -
+        left.start +
+        1;
+
+      const rightLength =
+        right.end -
+        right.start +
+        1;
+
+      return (
+        right.priority -
+        left.priority ||
+        right.score -
+        left.score ||
+        rightLength -
+        leftLength
+      );
+    }
+  );
+
+  const acceptedRanges = [];
+  const highlightedSpans =
+    new Set();
+
+  let firstElement = null;
+  let matchCount = 0;
+
+  candidateMatches.forEach(
+    (candidate) => {
+      const candidateLength =
+        candidate.end -
+        candidate.start +
+        1;
+
+      const overlappingRange =
+        acceptedRanges.find(
+          (accepted) => {
+            const overlapStart =
+              Math.max(
+                candidate.start,
+                accepted.start
+              );
+
+            const overlapEnd =
+              Math.min(
+                candidate.end,
+                accepted.end
+              );
+
+            const overlapLength =
+              Math.max(
+                0,
+                overlapEnd -
+                overlapStart +
+                1
+              );
+
+            const smallerLength =
+              Math.min(
+                candidateLength,
+                accepted.end -
+                accepted.start +
+                1
+              );
+
+            return (
+              smallerLength > 0 &&
+              overlapLength /
+              smallerLength >=
+              0.75
+            );
+          }
+        );
+
+      /*
+       * Highly overlapping generic duplicate
+       * match is ignored.
+       */
+      if (overlappingRange) {
+        return;
+      }
+
+      acceptedRanges.push({
+        start: candidate.start,
+        end: candidate.end,
+      });
+
+      matchCount += 1;
+
+      for (
+        let tokenIndex =
+          candidate.start;
+        tokenIndex <=
+        candidate.end;
+        tokenIndex++
+      ) {
+        const span =
+          pageTokens[tokenIndex]
+            ?.span;
+
+        if (span) {
+          highlightedSpans.add(
+            span
+          );
+        }
       }
     }
-  });
+  );
 
-  highlightedSpans.forEach((span) => {
-    span.style.background =
-      "rgba(255, 255, 0, 0.90)";
-    span.style.color = "#000";
-    span.style.borderRadius = "3px";
-    span.style.padding = "1px 2px";
-    span.style.boxDecorationBreak = "clone";
-    span.style.webkitBoxDecorationBreak = "clone";
+  highlightedSpans.forEach(
+    (span) => {
+      // span.style.background =
+      //   "rgb(60, 255, 0)";
+      // span.style.background = "#ffff00";
 
-    if (!firstElement) {
-      firstElement = span;
+      // span.style.color = "#000";
+      // span.style.borderRadius =
+      //   "3px";
+      // span.style.padding =
+      //   "1px 2px";
+
+      // span.style.boxDecorationBreak =
+      //   "clone";
+
+      // span.style.webkitBoxDecorationBreak =
+      //   "clone";
+      span.style.setProperty(
+        "background-color",
+        "rgba(255, 235, 59, 0.55)",
+        "important"
+      );
+
+      // Keep the PDF.js text transparent.
+      // The original text is already visible on the canvas.
+      span.style.setProperty(
+        "color",
+        "transparent",
+        "important"
+      );
+
+      span.style.setProperty(
+        "border-radius",
+        "2px",
+        "important"
+      );
+
+      span.style.setProperty(
+        "padding",
+        "0",
+        "important"
+      );
+
+      span.style.setProperty(
+        "box-shadow",
+        "0 0 0 1px rgba(255, 193, 7, 0.30)",
+        "important"
+      );
+
+      span.style.setProperty(
+        "box-decoration-break",
+        "clone",
+        "important"
+      );
+
+      span.style.setProperty(
+        "-webkit-box-decoration-break",
+        "clone",
+        "important"
+      );
+
+      if (!firstElement) {
+        firstElement = span;
+      }
     }
-  });
+  );
 
   return {
-    matched: highlightedSpans.size > 0,
+    matched:
+      highlightedSpans.size > 0,
     firstElement,
+    matchCount,
   };
 };
 
@@ -494,10 +1130,10 @@ const normalizeResultObject = (value) => {
   return {
     ...value,
 
-    // नेहमी string असणे आवश्यक
+
     summary: safeText(summaryValue),
 
-    // React मध्ये object render होऊ नये
+
     fileName: safeText(fileNameValue),
 
     pages: pagesValue,
@@ -515,9 +1151,7 @@ const normalizeHistoryResults = (value) => {
     return [];
   }
 
-  /*
-   * JSON string किंवा normal plain-text answer.
-   */
+
   if (typeof value === "string") {
     const trimmedValue = value.trim();
 
@@ -539,9 +1173,7 @@ const normalizeHistoryResults = (value) => {
     }
   }
 
-  /*
-   * Nested arrays सुद्धा flatten होतील.
-   */
+
   if (Array.isArray(value)) {
     return value
       .flatMap((item) =>
@@ -551,27 +1183,21 @@ const normalizeHistoryResults = (value) => {
   }
 
   if (typeof value === "object") {
-    /*
-     * { results: [...] }
-     */
+
     if (value.results !== undefined) {
       return normalizeHistoryResults(
         value.results
       );
     }
 
-    /*
-     * { Results: [...] }
-     */
+
     if (value.Results !== undefined) {
       return normalizeHistoryResults(
         value.Results
       );
     }
 
-    /*
-     * { data: { results: [...] } }
-     */
+
     if (
       value.data &&
       value.data.results !== undefined
@@ -581,9 +1207,7 @@ const normalizeHistoryResults = (value) => {
       );
     }
 
-    /*
-     * { response: { results: [...] } }
-     */
+
     if (
       value.response &&
       value.response.results !== undefined
@@ -593,10 +1217,7 @@ const normalizeHistoryResults = (value) => {
       );
     }
 
-    /*
-     * { answer: [...] } wrapper असल्यास.
-     * पण file/page माहिती असल्यास हा direct result आहे.
-     */
+
     const hasResultMetadata =
       value.summary !== undefined ||
       value.Summary !== undefined ||
@@ -622,9 +1243,7 @@ const normalizeHistoryResults = (value) => {
       );
     }
 
-    /*
-     * प्रत्येक direct result safe object मध्ये बदला.
-     */
+
     return [
       normalizeResultObject(value),
     ];
@@ -684,14 +1303,14 @@ class ResultCardErrorBoundary extends React.Component {
   }
 }
 
-const ResultCard = ({
-  r: rawResult,
-  i,
-  isTyping,
-  typingText
-}) => {
+const ResultCard = React.memo(function ResultCard({
+  r: rawResult
+  // i,
+  // isTyping,
+  // typingText
+}) {
 
-   const r = normalizeResultObject(rawResult);
+  const r = normalizeResultObject(rawResult);
 
   const targetPages = React.useMemo(() => {
     const pages = r.pages ?? r.Pages ?? r.page ?? r.Page ?? [];
@@ -710,77 +1329,62 @@ const ResultCard = ({
     return [];
   }, [r.pages, r.Pages, r.page, r.Page]);
 
-  //const activePage = targetPages[0] || 1;
-  // const answerPage =
-  //   r.answerPage ||
-  //   r.AnswerPage ||
-  //   targetPages[0] ||
-  //   1;
-
-  // const activePage = answerPage;
-  // const pdfContainerRef = useRef(null);
-  // const [showPdf, setShowPdf] = useState(false);
-
-  //const [highlightAreas, setHighlightAreas] = useState([]);
 
   const answerPage =
-  Number(
-    r.answerPage ??
-    r.AnswerPage ??
-    targetPages[0] ??
-    1
-  ) || 1;
+    Number(
+      r.answerPage ??
+      r.AnswerPage ??
+      targetPages[0] ??
+      1
+    ) || 1;
 
   const activePage = answerPage;
 
   const pdfContainerRef = useRef(null);
   const highlightRunRef = useRef(0);
 
+  const documentLoadedRef = useRef(false);
+  const preparedHighlightKeyRef = useRef("");
+
+  const pdfLoaderRef = useRef(null);
+  const pdfViewerLayerRef = useRef(null);
+
   const [showPdf, setShowPdf] = useState(false);
   const [pdfReadyTick, setPdfReadyTick] = useState(0);
 
-  // Normalizer
-  // const normalize = (text) => {
-  //   if (!text) return "";
-  //   return text.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
-  // };
+  const [isPdfPreparing, setIsPdfPreparing] =
+    useState(false);
 
-  // // 1. & 2. Split the answer into meaningful chunks (sentences)
-  // const answerChunks = React.useMemo(() => {
-  //   if (!r.summary) return [];
-  //   let cleanAnswer = r.summary.replace(/\n/g, " ").replace(/(?:Answer:|Steps:|Source:.*|Page.*|\d+\.\s*|[-*]\s*)/gi, ' ');
-  //   let sentences = cleanAnswer.split(/[.?!,;:]+\s+/).filter(s => {
-  //     const trimmed = s.trim();
-  //     return trimmed.length > 10 && trimmed.split(' ').length >= 3; // meaningful sentences
-  //   });
-  //   return sentences;
-  // }, [r.summary]);
- const displayedSummary = React.useMemo(() => {
-  const rawSummary = safeText(
-    r.summary ??
-    r.Summary ??
-    ""
-  );
+  const [isPdfVisible, setIsPdfVisible] =
+    useState(false);
 
-  return rawSummary
-    .replace(
-      /Source:\s*[\s\S]*$/i,
+
+  const displayedSummary = React.useMemo(() => {
+    const rawSummary = safeText(
+      r.summary ??
+      r.Summary ??
       ""
-    )
-    .trim();
+    );
 
-}, [r.summary, r.Summary]);
-  
+    return rawSummary
+      .replace(
+        /Source:\s*[\s\S]*$/i,
+        ""
+      )
+      .trim();
+
+  }, [r.summary, r.Summary]);
+
   const highlightSourceText =
-  r.highlightText ??
-  r.HighlightText ??
-  r.evidenceText ??
-  r.EvidenceText ??
-  r.matchedText ??
-  r.MatchedText ??
-  r.sourceText ??
-  r.SourceText ??
-  displayedSummary;
+    r.highlightText ??
+    r.HighlightText ??
+    r.evidenceText ??
+    r.EvidenceText ??
+    r.matchedText ??
+    r.MatchedText ??
+    r.sourceText ??
+    r.SourceText ??
+    displayedSummary;
 
   const highlightPhrases = React.useMemo(
     () => buildHighlightPhrases(highlightSourceText),
@@ -792,558 +1396,640 @@ const ResultCard = ({
     !!displayedSummary &&
     displayedSummary.trim() !==
     "Try rephrasing your question or using more specific keywords.";
-  // const highlightAnswerInPdf = useCallback(() => {
 
-  //   setTimeout(() => {
+  const pageNavigationPluginInstance =
+    pageNavigationPlugin();
 
-  //     const currentPageLayer = document.querySelector(
-  //       `[data-testid="core__page-layer-${activePage - 1}"]`
-  //     );
+  const defaultLayoutPluginInstance =
+    defaultLayoutPlugin();
 
-  //     if (!currentPageLayer) {
-  //       return;
-  //     }
+  const { jumpToPage } =
+    pageNavigationPluginInstance;
 
-  //     const textLayers = currentPageLayer.querySelectorAll(
-  //       '.rpv-core__text-layer span'
-  //     );
-  //     if (!textLayers.length) {
-  //       return;
-  //     }
+  const jumpToPageRef = useRef(jumpToPage);
 
-  //     // remove old highlights
-  //     textLayers.forEach((span) => {
-  //       span.style.background = 'rgba(255, 242, 0, 0.95)';
-  //       span.style.color = '';
-  //       span.style.borderRadius = '';
-  //       span.style.padding = '';
-  //     });
+  useEffect(() => {
+    jumpToPageRef.current = jumpToPage;
+  }, [jumpToPage]);
 
-  //     const answerText = normalize(displayedSummary);
+  const clearCurrentHighlights = useCallback(() => {
+    const viewerContainer = pdfContainerRef.current;
 
-  //     if (!answerText) {
-  //       return;
-  //     }
+    if (!viewerContainer) {
+      return;
+    }
 
-  //     const answerWords = answerText
-  //       .split(' ')
-  //       .filter(word => word.length > 3);
+    viewerContainer
+      .querySelectorAll(".rpv-core__text-layer span")
+      .forEach((span) => {
+        // span.style.background = "";
+        // span.style.color = "";
+        // span.style.borderRadius = "";
+        // span.style.padding = "";
+        // span.style.boxDecorationBreak = "";
+        // span.style.webkitBoxDecorationBreak = "";
+        span.style.removeProperty("background-color");
+        span.style.removeProperty("color");
+        span.style.removeProperty("border-radius");
+        span.style.removeProperty("padding");
+        span.style.removeProperty("box-shadow");
+        span.style.removeProperty("box-decoration-break");
+        span.style.removeProperty("-webkit-box-decoration-break");
+      });
+  }, []);
 
-  //     let firstMatchedElement = null;
+  //  const waitForPageTextLayer = useCallback(
+  //   async (
+  //     viewerContainer,
+  //     pageIndex,
+  //     runId,
+  //     timeoutMilliseconds = 5000
+  //   ) => {
+  //     const startedAt = Date.now();
 
-  //     textLayers.forEach((span) => {
-
-  //       const spanText = normalize(
-  //         span.textContent || ''
-  //       );
-
-  //       if (!spanText) {
-  //         return;
-  //       }
-
-  //       let matched = 0;
-
-  //       answerWords.forEach((word) => {
-
-  //         if (
-  //           spanText.includes(word)
-  //         ) {
-  //           matched++;
-  //         }
-
-  //       });
-
-  //       // relaxed matching
-  //       if (
-  //         matched >= 1 ||
-  //         answerText.includes(spanText)
-  //       ) 
-  //       {
-
-  //         span.style.background =
-  //           'rgba(255, 255, 0, 0.95)';
-
-  //         span.style.color = '#000';
-
-  //         span.style.borderRadius = '3px';
-
-  //         span.style.padding = '1px 2px';
-
-  //         if (!firstMatchedElement) {
-  //           firstMatchedElement = span;
-  //         }
-  //       }
-
-  //     });
-
-  //     // auto jump to first highlight
-  //     if (firstMatchedElement) {
-
-  //       firstMatchedElement.scrollIntoView({
-  //         behavior: 'instant',
-  //         block: 'center',
-  //       });
-
-  //     }
-
-  //   }, 2500);
-
-  // },[activePage, displayedSummary, answerChunks]);
-
-  // const pageNavigationPluginInstance =
-  //   pageNavigationPlugin();
-
-  // const { jumpToPage } =
-  //   pageNavigationPluginInstance;
-
-  // const defaultLayoutPluginInstance = defaultLayoutPlugin();
- const pageNavigationPluginInstance =
-  pageNavigationPlugin();
-
-const defaultLayoutPluginInstance =
-  defaultLayoutPlugin();
-
-const { jumpToPage } =
-  pageNavigationPluginInstance;
-
-  // const highlightAnswerInPdf = useCallback(() => {
-
-  //   const timer = setTimeout(() => {
-
-  //     const viewerContainer =
-  //       //document.querySelector('.chatbot-result-pdf');
-  //       pdfContainerRef.current;
-
-  //     if (!viewerContainer) {
-  //       return;
-  //     }
-
-  //     // CLEAR OLD HIGHLIGHTS
-  //     viewerContainer
-  //       .querySelectorAll('.rpv-core__text-layer span')
-  //       .forEach((span) => {
-
-  //         span.style.background = '';
-  //         span.style.color = '';
-  //         span.style.borderRadius = '';
-  //         span.style.padding = '';
-
-  //       });
-
-  //     // CLEAN ANSWER
-  //     const cleanAnswer = normalize(
-  //       displayedSummary
-  //         .replace(/Source:\s*[\s\S]*$/i, '')
-  //         .replace(/\n/g, ' ')
-  //     );
-
-  //     if (!cleanAnswer || cleanAnswer.length < 20) {
-  //       return;
-  //     }
-
-  //     // BREAK ANSWER INTO MEANINGFUL LINES
-  //     const answerChunks = cleanAnswer
-  //       .split(/[.?!]\s+/)
-  //       .map((s) => s.trim())
-  //       .filter((s) => s.length > 15);
-
-  //     let firstMatchedElement = null;
-  //     let matchedPage = null;
-  //     let foundFirstMatch = false;
-  //     const MAX_PAGES_TO_SCAN = 15;
-  //     // CHECK CURRENT PAGE + NEXT 5 PAGES
-  //     for (
-  //       let offset = 0;
-  //       offset <= MAX_PAGES_TO_SCAN;
-  //       offset++
+  //     while (
+  //       Date.now() - startedAt <
+  //       timeoutMilliseconds
   //     ) {
-
-  //       const pageIndex =
-  //         (activePage - 1) + offset;
+  //       if (runId !== highlightRunRef.current) {
+  //         return [];
+  //       }
 
   //       const pageLayer = viewerContainer.querySelector(
   //         `[data-testid="core__page-layer-${pageIndex}"]`
   //       );
 
-  //       if (!pageLayer) {
-  //         continue;
+  //       if (pageLayer) {
+  //         const spans = Array.from(
+  //           pageLayer.querySelectorAll(
+  //             ".rpv-core__text-layer span"
+  //           )
+  //         );
+
+  //         const hasReadableText = spans.some(
+  //           (span) =>
+  //             normalizePdfText(
+  //               span.textContent || ""
+  //             ).length > 0
+  //         );
+
+  //         if (spans.length && hasReadableText) {
+  //           return spans;
+  //         }
   //       }
 
-  //       const spans = Array.from(
-  //         pageLayer.querySelectorAll(
-  //           '.rpv-core__text-layer span'
-  //         )
-  //       );
+  //       await wait(150);
+  //     }
+
+  //     return [];
+  //   },
+  //   []
+  // );
+
+  const waitForPageTextLayer = useCallback(
+    (
+      viewerContainer,
+      pageIndex,
+      runId,
+      timeoutMilliseconds = 5000
+    ) => {
+      return new Promise((resolve) => {
+        let completed = false;
+        let observer = null;
+        let timeoutId = null;
+        let settleTimerId = null;
+
+        const getPageSpans = () => {
+          if (
+            runId !== highlightRunRef.current
+          ) {
+            return [];
+          }
+
+          const pageLayer =
+            viewerContainer.querySelector(
+              `[data-testid="core__page-layer-${pageIndex}"]`
+            );
+
+          if (!pageLayer) {
+            return [];
+          }
+
+          return Array.from(
+            pageLayer.querySelectorAll(
+              ".rpv-core__text-layer span"
+            )
+          );
+        };
+
+        const finish = (spans = []) => {
+          if (completed) {
+            return;
+          }
+
+          completed = true;
+
+          if (observer) {
+            observer.disconnect();
+          }
+
+          if (timeoutId) {
+            window.clearTimeout(timeoutId);
+          }
+
+          if (settleTimerId) {
+            window.clearTimeout(settleTimerId);
+          }
+
+          resolve(spans);
+        };
+
+        /*
+         * PDF.js table text एकाच वेळी तयार करत नाही.
+         * शेवटच्या DOM change नंतर 180ms wait करून
+         * पूर्ण text layer घ्या.
+         */
+        const scheduleStableCheck = () => {
+          if (settleTimerId) {
+            window.clearTimeout(settleTimerId);
+          }
+
+          settleTimerId =
+            window.setTimeout(() => {
+              if (
+                runId !==
+                highlightRunRef.current
+              ) {
+                finish([]);
+                return;
+              }
+
+              const spans = getPageSpans();
+
+              const completePageText =
+                normalizePdfText(
+                  spans
+                    .map(
+                      (span) =>
+                        span.textContent || ""
+                    )
+                    .join(" ")
+                );
+
+              /*
+               * फक्त एक-दोन span मिळाल्यावर resolve
+               * करू नका. पूर्ण readable page आवश्यक.
+               */
+              if (
+                spans.length >= 3 &&
+                completePageText.length >= 30
+              ) {
+                finish(spans);
+              }
+            }, 180);
+        };
+
+        observer = new MutationObserver(() => {
+          scheduleStableCheck();
+        });
+
+        observer.observe(viewerContainer, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+
+        /*
+         * Text layer आधीच तयार असू शकते.
+         */
+        scheduleStableCheck();
+
+        timeoutId = window.setTimeout(() => {
+          const spans = getPageSpans();
+
+          finish(spans);
+        }, timeoutMilliseconds);
+      });
+    },
+    []
+  );
+  // const highlightAnswerInPdf = useCallback(
+  //   async () => {
+  //     const viewerContainer =
+  //       pdfContainerRef.current;
+
+  //     if (
+  //       !viewerContainer ||
+  //       !highlightPhrases.length
+  //     ) {
+  //       return;
+  //     }
+
+  //     const runId =
+  //       ++highlightRunRef.current;
+
+  //     clearCurrentHighlights();
+
+  //     const candidatePages = Array.from(
+  //       new Set([
+  //         activePage,
+  //         ...targetPages,
+  //       ])
+  //     )
+  //       .map((page) => Number(page))
+  //       .filter(
+  //         (page) =>
+  //           Number.isFinite(page) &&
+  //           page > 0
+  //       )
+  //       .slice(0, 4);
+
+  //     for (const pageNumber of candidatePages) {
+  //       if (runId !== highlightRunRef.current) {
+  //         return;
+  //       }
+
+  //       const pageIndex = pageNumber - 1;
+
+  //       jumpToPage(pageIndex);
+
+  //       const spans =
+  //         await waitForPageTextLayer(
+  //           viewerContainer,
+  //           pageIndex,
+  //           runId,
+  //           pageNumber === activePage
+  //             ? 6000
+  //             : 3500
+  //         );
+
+  //       if (runId !== highlightRunRef.current) {
+  //         return;
+  //       }
 
   //       if (!spans.length) {
   //         continue;
   //       }
 
-  //       // COMBINE FULL PAGE TEXT
-  //       const fullPageText = normalize(
-  //         spans
-  //           .map((s) => s.textContent || '')
-  //           .join(' ')
-  //       );
+  //       const result =
+  //         highlightMatchingSpans(
+  //           spans,
+  //           highlightPhrases
+  //         );
 
-  //       // CHECK IF ANSWER EXISTS IN PAGE
-  //       let pageMatched = false;
-
-  //       for (const chunk of answerChunks) {
-
-  //         if (
-  //           fullPageText.includes(chunk)
-  //         ) {
-  //           pageMatched = true;
-  //           break;
-  //         }
-
-  //         // RELAXED MATCHING
-  //         const chunkWords = chunk
-  //           .split(' ')
-  //           .filter((w) => w.length > 4);
-
-  //         const matchedWords =
-  //           chunkWords.filter((word) =>
-  //             fullPageText.includes(word)
-  //           );
-
-  //         const score =
-  //           matchedWords.length /
-  //           chunkWords.length;
-
-  //         if (score >= 0.6) {
-  //           pageMatched = true;
-  //           break;
-  //         }
-
-  //       }
-
-  //       // IF PAGE MATCH FOUND
-  //       if (pageMatched) {
-
-  //         if (!foundFirstMatch) {
-
-  //           matchedPage = pageIndex;
-
-  //           foundFirstMatch = true;
-
-  //         }
-
-  //         // HIGHLIGHT MATCHING SPANS
-  //         spans.forEach((span) => {
-
-  //           const spanText = normalize(
-  //             span.textContent || ''
-  //           );
-
-  //           if (
-  //             !spanText ||
-  //             spanText.length < 3
-  //           ) {
-  //             return;
-  //           }
-
-  //           let isMatched = false;
-
-  //           answerChunks.forEach((chunk) => {
-
-  //             // DIRECT MATCH
-  //             // if (
-  //             //   chunk.includes(spanText)
-  //             // ) {
-  //             //   isMatched = true;
-  //             // }
-  //             if (
-  //               chunk.includes(spanText) ||
-  //               spanText.includes(chunk)
-  //             ) {
-  //               isMatched = true;
-  //             }
-  //             // WORD MATCH SCORE
-  //             const chunkWords = chunk
-  //               .split(' ')
-  //               .filter((w) => w.length > 4);
-
-  //             const matchedWords =
-  //               chunkWords.filter((word) =>
-  //                 spanText.includes(word)
-  //               );
-
-  //             const score =
-  //               matchedWords.length /
-  //               chunkWords.length;
-
-  //             // if (score >= 0.5) {
-  //             //   isMatched = true;
-  //             // }
-  //             if (
-  //               score >= 0.35 ||
-  //               matchedWords.length >= 2
-  //             ) {
-  //               isMatched = true;
-  //             }
+  //       if (result.matched) {
+  //         requestAnimationFrame(() => {
+  //           result.firstElement?.scrollIntoView({
+  //             behavior: "smooth",
+  //             block: "center",
+  //             inline: "nearest",
   //           });
-
-  //           if (isMatched) {
-
-  //             span.style.background =
-  //               'rgba(255, 255, 0, 0.95)';
-
-  //             span.style.color = '#000';
-
-  //             span.style.borderRadius = '4px';
-
-  //             span.style.padding = '2px 3px';
-
-  //             if (!firstMatchedElement) {
-  //               firstMatchedElement = span;
-  //             }
-
-  //           }
-
   //         });
 
-  //         // STOP AFTER FIRST MATCHED PAGE
-  //         //break;
-
+  //         return;
   //       }
-
   //     }
 
-  //     // AUTO SCROLL TO MATCH
-  //     if (firstMatchedElement) {
-
-  //       firstMatchedElement.scrollIntoView({
-  //         behavior: 'smooth',
-  //         block: 'center',
-  //       });
-
-  //     }
-
-  //     // AUTO JUMP TO MATCHED PAGE
-  //     if (
-  //       matchedPage !== null &&
-  //       matchedPage !== (activePage - 1)
-  //     ) {
-
-  //       jumpToPage(matchedPage);
-
-  //     }
-
-  //   }, 2200);
-
-  //   return () => clearTimeout(timer);
-
-  // }, [
-  //   activePage,
-  //   displayedSummary
-  // ]);
-
-
-  // useEffect(() => {
-
-  //   if (showPdf) {
-
-  //     highlightAnswerInPdf();
-
-  //   }
-
-  // }, [showPdf, activePage, highlightAnswerInPdf]);
-
-  // useEffect(() => {
-
-  //   if (showPdf && activePage > 0) {
-
-  //     setTimeout(() => {
-
+  //     if (runId === highlightRunRef.current) {
   //       jumpToPage(activePage - 1);
+  //     }
+  //   },
+  //   [
+  //     activePage,
+  //     targetPages,
+  //     highlightPhrases,
+  //     jumpToPage,
+  //     clearCurrentHighlights,
+  //     waitForPageTextLayer,
+  //   ]
+  // );
+  const highlightAnswerInPdf = useCallback(
+    async () => {
+      const viewerContainer =
+        pdfContainerRef.current;
 
-  //     }, 800);
-
-  //   }
-
-  // }, [showPdf, activePage]);
-
-  const clearCurrentHighlights = useCallback(() => {
-  const viewerContainer = pdfContainerRef.current;
-
-  if (!viewerContainer) {
-    return;
-  }
-
-  viewerContainer
-    .querySelectorAll(".rpv-core__text-layer span")
-    .forEach((span) => {
-      span.style.background = "";
-      span.style.color = "";
-      span.style.borderRadius = "";
-      span.style.padding = "";
-      span.style.boxDecorationBreak = "";
-      span.style.webkitBoxDecorationBreak = "";
-    });
-}, []);
-
-const waitForPageTextLayer = useCallback(
-  async (
-    viewerContainer,
-    pageIndex,
-    runId,
-    timeoutMilliseconds = 5000
-  ) => {
-    const startedAt = Date.now();
-
-    while (
-      Date.now() - startedAt <
-      timeoutMilliseconds
-    ) {
-      if (runId !== highlightRunRef.current) {
-        return [];
+      if (!viewerContainer) {
+        return;
       }
 
-      const pageLayer = viewerContainer.querySelector(
-        `[data-testid="core__page-layer-${pageIndex}"]`
-      );
+      const runId =
+        ++highlightRunRef.current;
 
-      if (pageLayer) {
-        const spans = Array.from(
-          pageLayer.querySelectorAll(
-            ".rpv-core__text-layer span"
+      let matchFound = false;
+      let matchedElement = null;
+
+      try {
+        clearCurrentHighlights();
+
+        const candidatePages = Array.from(
+          new Set([
+            activePage,
+            ...targetPages,
+          ])
+        )
+          .map((page) => Number(page))
+          .filter(
+            (page) =>
+              Number.isFinite(page) &&
+              page > 0
           )
+        //.slice(0, 4);
+
+        if (!highlightPhrases.length) {
+          jumpToPageRef.current(
+            activePage - 1
+          );
+
+          return;
+        }
+
+        for (
+          const pageNumber of candidatePages
+        ) {
+          if (
+            runId !==
+            highlightRunRef.current
+          ) {
+            return;
+          }
+
+          const pageIndex =
+            pageNumber - 1;
+
+          /*
+           * Viewer initialPage वापरून active page वर
+           * आधीच आलेला आहे. पुन्हा jump केल्यास
+           * text layer reset होऊ शकते.
+           */
+          if (pageNumber !== activePage) {
+            jumpToPageRef.current(pageIndex);
+          }
+
+          const spans =
+            await waitForPageTextLayer(
+              viewerContainer,
+              pageIndex,
+              runId,
+              pageNumber === activePage
+                ? 5000
+                : 2500
+            );
+
+          if (
+            runId !==
+            highlightRunRef.current
+          ) {
+            return;
+          }
+
+          if (!spans.length) {
+            continue;
+          }
+
+          let result =
+            highlightMatchingSpans(
+              spans,
+              highlightPhrases
+            );
+
+          if (!result.matched) {
+            continue;
+          }
+
+          /*
+           * दोन browser frames wait करून तपासा की
+           * PDF.js ने text layer replace केली नाही.
+           */
+          await nextAnimationFrame();
+          await nextAnimationFrame();
+
+          if (
+            runId !==
+            highlightRunRef.current
+          ) {
+            return;
+          }
+
+          const latestPageLayer =
+            viewerContainer.querySelector(
+              `[data-testid="core__page-layer-${pageIndex}"]`
+            );
+
+          const latestSpans =
+            latestPageLayer
+              ? Array.from(
+                latestPageLayer.querySelectorAll(
+                  ".rpv-core__text-layer span"
+                )
+              )
+              : [];
+
+          /*
+           * नवीन text layer तयार झाली असेल तर
+           * latest spans वर highlight पुन्हा apply करा.
+           */
+          if (latestSpans.length > 0) {
+            result =
+              highlightMatchingSpans(
+                latestSpans,
+                highlightPhrases
+              );
+          }
+
+          // if (result.matched) {
+          //   matchFound = true;
+          //   matchedElement =
+          //     result.firstElement;
+
+          //   break;
+          // }
+          if (result.matched) {
+            matchFound = true;
+
+            if (!matchedElement) {
+              matchedElement =
+                result.firstElement;
+            }
+
+            // break करू नका
+            // त्यामुळे Answer Page आणि सर्व Related Pages scan होतील
+          }
+        }
+
+        if (matchFound) {
+          // शेवटी Answer Found Page वर या
+          jumpToPageRef.current(
+            activePage - 1
+          );
+
+          const answerPageSpans =
+            await waitForPageTextLayer(
+              viewerContainer,
+              activePage - 1,
+              runId,
+              3000
+            );
+
+          if (answerPageSpans.length > 0) {
+            const answerPageResult =
+              highlightMatchingSpans(
+                answerPageSpans,
+                highlightPhrases
+              );
+
+            answerPageResult.firstElement
+              ?.scrollIntoView({
+                behavior: "auto",
+                block: "center",
+                inline: "nearest",
+              });
+          }
+        }
+        else {
+          /*
+           * Highlight match नसेल तर answer page
+           * वर परत या.
+           */
+          jumpToPageRef.current(
+            activePage - 1
+          );
+
+          console.warn(
+            "PDF highlight text was not matched",
+            // {
+            //   fileName:
+            //     r.fileName || r.FileName,
+            //   activePage,
+            //   highlightPhrases,
+            // }
+          );
+        }
+
+      } catch (error) {
+        console.error(
+          "PDF highlight failed:",
+          error
         );
 
-        const hasReadableText = spans.some(
-          (span) =>
-            normalizePdfText(
-              span.textContent || ""
-            ).length > 0
+        jumpToPageRef.current(
+          activePage - 1
         );
 
-        if (spans.length && hasReadableText) {
-          return spans;
+      } finally {
+        /*
+         * इथे setIsPdfVisible किंवा
+         * setIsPdfPreparing वापरू नका.
+         *
+         * State update केल्यास ResultCard render
+         * होऊन PDF text layer बदलू शकते.
+         */
+        await nextAnimationFrame();
+
+        if (
+          runId ===
+          highlightRunRef.current
+        ) {
+          if (pdfLoaderRef.current) {
+            pdfLoaderRef.current.style.display =
+              "none";
+          }
+
+          if (pdfViewerLayerRef.current) {
+            pdfViewerLayerRef.current.style.opacity =
+              "1";
+
+            pdfViewerLayerRef.current.style.pointerEvents =
+              "auto";
+          }
         }
       }
+    },
+    [
+      activePage,
+      targetPages,
+      highlightPhrases,
+      r.fileName,
+      r.FileName,
+      clearCurrentHighlights,
+      waitForPageTextLayer,
+    ]
+  );
+  // useEffect(() => {
+  //   if (!showPdf || !hasValidPdf) {
+  //     return undefined;
+  //   }
 
-      await wait(150);
-    }
+  //   const timer = window.setTimeout(() => {
+  //     highlightAnswerInPdf();
+  //   }, 100);
 
-    return [];
-  },
-  []
-);
+  //   return () => {
+  //     window.clearTimeout(timer);
 
-const highlightAnswerInPdf = useCallback(
-  async () => {
-    const viewerContainer =
-      pdfContainerRef.current;
-
+  //     highlightRunRef.current += 1;
+  //   };
+  // }, [
+  //   showPdf,
+  //   hasValidPdf,
+  //   activePage,
+  //   pdfReadyTick,
+  //   highlightAnswerInPdf,
+  // ]);
+  useEffect(() => {
+    /*
+    * PDF document load होण्यापूर्वी
+    * highlight सुरू करू नका.
+    */
     if (
-      !viewerContainer ||
-      !highlightPhrases.length
+      !showPdf ||
+      !hasValidPdf ||
+      pdfReadyTick === 0
     ) {
       return;
     }
 
-    const runId =
-      ++highlightRunRef.current;
+    const highlightKey = [
+      r.fileName || r.FileName,
+      activePage,
+      highlightPhrases
+        .map((phrase) =>
+          phrase.text
+        )
+        .join("|"),
+    ].join("::");
 
-    clearCurrentHighlights();
-
-    const candidatePages = Array.from(
-      new Set([
-        activePage,
-        ...targetPages,
-      ])
-    )
-      .map((page) => Number(page))
-      .filter(
-        (page) =>
-          Number.isFinite(page) &&
-          page > 0
-      )
-      .slice(0, 4);
-
-    for (const pageNumber of candidatePages) {
-      if (runId !== highlightRunRef.current) {
-        return;
-      }
-
-      const pageIndex = pageNumber - 1;
-
-      jumpToPage(pageIndex);
-
-      const spans =
-        await waitForPageTextLayer(
-          viewerContainer,
-          pageIndex,
-          runId,
-          pageNumber === activePage
-            ? 6000
-            : 3500
-        );
-
-      if (runId !== highlightRunRef.current) {
-        return;
-      }
-
-      if (!spans.length) {
-        continue;
-      }
-
-      const result =
-        highlightMatchingSpans(
-          spans,
-          highlightPhrases
-        );
-
-      if (result.matched) {
-        requestAnimationFrame(() => {
-          result.firstElement?.scrollIntoView({
-            behavior: "smooth",
-            block: "center",
-            inline: "nearest",
-          });
-        });
-
-        return;
-      }
+    /*
+    * समान PDF highlight process पुन्हा
+    * चालवू नका.
+    */
+    if (
+      preparedHighlightKeyRef.current ===
+      highlightKey
+    ) {
+      return;
     }
 
-    if (runId === highlightRunRef.current) {
-      jumpToPage(activePage - 1);
-    }
-  },
-  [
-    activePage,
-    targetPages,
-    highlightPhrases,
-    jumpToPage,
-    clearCurrentHighlights,
-    waitForPageTextLayer,
-  ]
-);
+    preparedHighlightKeyRef.current =
+      highlightKey;
 
-useEffect(() => {
-  if (!showPdf || !hasValidPdf) {
-    return undefined;
-  }
-
-  const timer = window.setTimeout(() => {
     highlightAnswerInPdf();
-  }, 100);
 
-  return () => {
-    window.clearTimeout(timer);
+  }, [
+    showPdf,
+    hasValidPdf,
+    pdfReadyTick,
+    activePage,
+    highlightPhrases,
+    r.fileName,
+    r.FileName,
+    highlightAnswerInPdf,
+  ]);
 
-    highlightRunRef.current += 1;
-  };
-}, [
-  showPdf,
-  hasValidPdf,
-  activePage,
-  pdfReadyTick,
-  highlightAnswerInPdf,
-]);
+  useEffect(() => {
+    return () => {
+      highlightRunRef.current += 1;
+    };
+  }, []);
 
   return (
     <div className="chatbot-result-card">
@@ -1376,9 +2062,9 @@ useEffect(() => {
             {typingText}
             <span className="chatbot-cursor">|</span>
           </span>
-        ) : (
+          ) : (
           displayedSummary || "No answer available"
-        )} */}
+          )} */}
         {displayedSummary || "No answer available"}
       </div>
 
@@ -1396,10 +2082,46 @@ useEffect(() => {
 
             {" "} | PDF file: {r.fileName || r.FileName}
 
-            <button
+            {/* <button
               className="chatbot-source-view-icon"
               onClick={() => setShowPdf(!showPdf)}
               aria-label="View PDF"
+            >
+              &gt;
+            </button> */}
+            <button
+              type="button"
+              className="chatbot-source-view-icon"
+              onClick={() => {
+                // PDF close
+                if (showPdf) {
+                  highlightRunRef.current += 1;
+
+                  setShowPdf(false);
+                  setPdfReadyTick(0);
+                  setIsPdfPreparing(false);
+                  setIsPdfVisible(false);
+
+                  documentLoadedRef.current = false;
+                  preparedHighlightKeyRef.current = "";
+
+                  return;
+                }
+
+                // PDF open
+                highlightRunRef.current += 1;
+
+                documentLoadedRef.current = false;
+                preparedHighlightKeyRef.current = "";
+
+                setPdfReadyTick(0);
+                setIsPdfVisible(false);
+                setIsPdfPreparing(true);
+                setShowPdf(true);
+              }}
+              aria-label={
+                showPdf ? "Close PDF" : "View PDF"
+              }
             >
               &gt;
             </button>
@@ -1407,16 +2129,16 @@ useEffect(() => {
         </div>
       )}
 
-      {showPdf && hasValidPdf && (
+      {/* {showPdf && hasValidPdf && (
         <div ref={pdfContainerRef} className="chatbot-result-pdf" style={{ maxHeight: '420px', height: '420px', overflow: 'hidden', border: '1px solid rgba(148, 163, 184, 0.18)', borderRadius: '18px', marginTop: '1rem' }}>
-          <Worker workerUrl="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js">
-            {/* <Viewer
+          <Worker workerUrl="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js"> */}
+      {/* <Viewer
               key={`${r.fileName || r.FileName}-${activePage}`}
               fileUrl={getPdf(r.fileName || r.FileName)}
               plugins={[defaultLayoutPluginInstance, highlightPluginInstance, textExtractionPlugin]}
               initialPage={activePage > 0 ? activePage - 1 : 0}
             /> */}
-            <Viewer
+      {/* <Viewer
           key={`${r.fileName || r.FileName}-${activePage}`}
           fileUrl={getPdf(r.fileName || r.FileName)}
           plugins={[
@@ -1434,10 +2156,100 @@ useEffect(() => {
         />
           </Worker>
         </div>
+      )} */}
+
+      {showPdf && hasValidPdf && (
+        <div
+          ref={pdfContainerRef}
+          className="chatbot-result-pdf"
+          style={{
+            position: "relative",
+            maxHeight: "420px",
+            height: "420px",
+            overflow: "hidden",
+            border:
+              "1px solid rgba(148, 163, 184, 0.18)",
+            borderRadius: "18px",
+            marginTop: "1rem",
+            background: "#0f1117",
+          }}
+        >
+          {/* PDF + highlight तयार होईपर्यंत loader */}
+          {isPdfPreparing &&
+            !isPdfVisible && (
+              <div
+                ref={pdfLoaderRef}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  zIndex: 50,
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "center",
+                  alignItems: "center",
+                  gap: "12px",
+                  background: "#0f1117",
+                  color: "#cbd5e1",
+                }}
+              >
+                <div
+                  className="pdf-highlight-loader"
+                />
+
+                <span>
+                  Preparing page...
+                </span>
+              </div>
+            )}
+
+
+          <div
+            ref={pdfViewerLayerRef}
+            style={{
+              width: "100%",
+              height: "100%",
+              opacity: 0,
+              pointerEvents: "none",
+              transition: "opacity 0.05s linear",
+            }}
+          >
+            <Worker workerUrl="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js">
+              <Viewer
+                key={`${r.fileName || r.FileName
+                  }-${activePage}`}
+                fileUrl={getPdf(
+                  r.fileName || r.FileName
+                )}
+                plugins={[
+                  defaultLayoutPluginInstance,
+                  pageNavigationPluginInstance,
+                ]}
+                initialPage={
+                  activePage > 0
+                    ? activePage - 1
+                    : 0
+                }
+                onDocumentLoad={() => {
+                  if (
+                    documentLoadedRef.current
+                  ) {
+                    return;
+                  }
+
+                  documentLoadedRef.current = true;
+
+                  setPdfReadyTick(
+                    (current) => current + 1
+                  );
+                }}
+              />
+            </Worker>
+          </div>
+        </div>
       )}
     </div>
   );
-};
+});
 
 const Chatbot = () => {
   const [question, setQuestion] = useState("");
@@ -1489,10 +2301,10 @@ const Chatbot = () => {
 
       //setSessions(data.sessions || []);
       setSessions(
-      Array.isArray(data?.sessions)
-        ? data.sessions
-        : []
-    );
+        Array.isArray(data?.sessions)
+          ? data.sessions
+          : []
+      );
 
     } catch (err) {
       console.error("Failed to load chat history", err);
@@ -1564,9 +2376,9 @@ const Chatbot = () => {
 
       // const responseResults = data.results || [];
       const responseResults =
-      normalizeHistoryResults(
-        data?.results ?? []
-      );
+        normalizeHistoryResults(
+          data?.results ?? []
+        );
       const currentQuestion = question;
       setPendingQuestion(currentQuestion);
       setQuestion("");
@@ -1582,21 +2394,6 @@ const Chatbot = () => {
       setPendingQuestion(null);
       await fetchHistory();
 
-
-      // if (responseResults.length > 0 && responseResults[0].summary) {
-      //   const text = responseResults[0].summary;
-      //   let i = 0;
-      //   const typeInterval = setInterval(() => {
-      //     setTypingText(text.slice(0, i + 1));
-      //     i++;
-      //     if (i >= text.length) {
-      //       clearInterval(typeInterval);
-      //       setIsTyping(false);
-      //     }
-      //   }, 15);
-      // } else {
-      //   setIsTyping(false);
-      // }
       setIsTyping(false);
       setTypingText("");
     } catch (err) {
@@ -1683,157 +2480,115 @@ const Chatbot = () => {
             </div>
           ) : (
             (Array.isArray(sessions) ? sessions : []).map(
-            (session) => (
-              <button type="button"
-                key={session.sessionId} 
-                className={`chatbot-sidebar-item ${session.sessionId === sessionId ? "active" : ""}`}
-                // onClick={() => {
-                //   setSessionId(session.sessionId);
-                //   sessionStorage.setItem("chatSessionId", session.sessionId);
+              (session) => (
+                <button type="button"
+                  key={session.sessionId}
+                  className={`chatbot-sidebar-item ${session.sessionId === sessionId ? "active" : ""}`}
 
-                //   const parsedConversation = session.messages.map((msg) => {
-                //     let parsedResults = [];
-                //     try {
-                //       parsedResults =
-                //         typeof msg.answer === "string"
-                //           ? JSON.parse(msg.answer)
-                //           : msg.answer;
-                //     } catch {
-                //       // ignore parse errors
-                //     }
-
-                //     return {
-                //       question: msg.question,
-                //       results: parsedResults,
-                //       askedAt: msg.askedAt,
-                //     };
-                //   });
-
-                //   setConversation(parsedConversation);
-
-
-                //   setTimeout(() => {
-                //     if (chatScrollRef.current) {
-                //       chatScrollRef.current.scrollTop =
-                //         chatScrollRef.current.scrollHeight;
-                //     }
-                //   }, 50);
-
-                //   if (window.innerWidth < 768) {
-                //     setSidebarOpen(false);
-                //   }
-                // }}
-                onClick={() => {
-                try {
-                  setSidebarOpen(false);
-
-                  setLoading(false);
-                  setPendingQuestion(null);
-                  setIsTyping(false);
-                  setTypingText("");
-
-                  setSessionId(session.sessionId);
-
-                  sessionStorage.setItem(
-                    "chatSessionId",
-                    session.sessionId
-                  );
-
-                  /*
-                  * काही जुन्या records मध्ये messages हे
-                  * JSON string म्हणून save झालेले असू शकतात.
-                  */
-                  let sessionMessages = session.messages;
-
-                  if (typeof sessionMessages === "string") {
+                  onClick={() => {
                     try {
-                      sessionMessages =
-                        JSON.parse(sessionMessages);
-                    } catch (parseError) {
+                      setSidebarOpen(false);
+
+                      setLoading(false);
+                      setPendingQuestion(null);
+                      setIsTyping(false);
+                      setTypingText("");
+
+                      setSessionId(session.sessionId);
+
+                      sessionStorage.setItem(
+                        "chatSessionId",
+                        session.sessionId
+                      );
+
+
+                      let sessionMessages = session.messages;
+
+                      if (typeof sessionMessages === "string") {
+                        try {
+                          sessionMessages =
+                            JSON.parse(sessionMessages);
+                        } catch (parseError) {
+                          console.error(
+                            "Unable to parse session messages:",
+                            parseError
+                          );
+
+                          sessionMessages = [];
+                        }
+                      }
+
+                      if (!Array.isArray(sessionMessages)) {
+                        sessionMessages = [];
+                      }
+
+                      const parsedConversation =
+                        sessionMessages
+                          .map((msg, messageIndex) => {
+                            const rawAnswer =
+                              msg?.answer ??
+                              msg?.results ??
+                              msg?.response ??
+                              [];
+
+                            const normalizedResults =
+                              normalizeHistoryResults(rawAnswer);
+
+                            return {
+                              question:
+                                safeText(
+                                  msg?.question ??
+                                  msg?.Question ??
+                                  `Saved Question ${messageIndex + 1}`
+                                ) ||
+                                `Saved Question ${messageIndex + 1}`,
+
+                              results: normalizedResults,
+
+                              askedAt:
+                                msg?.askedAt ??
+                                msg?.createdAt ??
+                                msg?.CreatedAt ??
+                                new Date().toISOString(),
+                            };
+                          })
+                          .filter(
+                            (message) =>
+                              message.question ||
+                              message.results.length > 0
+                          );
+
+                      console.log(
+                        "Parsed old conversation:",
+                        parsedConversation
+                      );
+
+                      setConversation(parsedConversation);
+
+                      window.setTimeout(() => {
+                        if (chatScrollRef.current) {
+                          chatScrollRef.current.scrollTop =
+                            chatScrollRef.current.scrollHeight;
+                        }
+                      }, 100);
+
+
+                    } catch (error) {
                       console.error(
-                        "Unable to parse session messages:",
-                        parseError
+                        "Failed to open old conversation:",
+                        error
                       );
 
-                      sessionMessages = [];
+
+                      setConversation([]);
                     }
-                  }
-
-                  if (!Array.isArray(sessionMessages)) {
-                    sessionMessages = [];
-                  }
-
-                  const parsedConversation =
-                    sessionMessages
-                      .map((msg, messageIndex) => {
-                        const rawAnswer =
-                          msg?.answer ??
-                          msg?.results ??
-                          msg?.response ??
-                          [];
-
-                        const normalizedResults =
-                          normalizeHistoryResults(rawAnswer);
-
-                        return {
-                          question:
-                        safeText(
-                          msg?.question ??
-                          msg?.Question ??
-                          `Saved Question ${messageIndex + 1}`
-                        ) ||
-                        `Saved Question ${messageIndex + 1}`,
-
-                          results: normalizedResults,
-
-                          askedAt:
-                            msg?.askedAt ??
-                            msg?.createdAt ??
-                            msg?.CreatedAt ??
-                            new Date().toISOString(),
-                        };
-                      })
-                      .filter(
-                        (message) =>
-                          message.question ||
-                          message.results.length > 0
-                      );
-
-                  console.log(
-                    "Parsed old conversation:",
-                    parsedConversation
-                  );
-
-                  setConversation(parsedConversation);
-
-                  window.setTimeout(() => {
-                    if (chatScrollRef.current) {
-                      chatScrollRef.current.scrollTop =
-                        chatScrollRef.current.scrollHeight;
-                    }
-                  }, 100);
-
-                  // if (window.innerWidth < 768) {
-                  //   setSidebarOpen(false);
-                  // }
-                } catch (error) {
-                  console.error(
-                    "Failed to open old conversation:",
-                    error
-                  );
-
-                  /*
-                  * Error आला तरी पूर्ण page black होऊ नये.
-                  */
-                  setConversation([]);
-                }
-              }}
-              >
-                <span className="chatbot-sidebar-item-text">
-                  {session.title || "New Chat"}
-                </span>
-              </button>
-            ))
+                  }}
+                >
+                  <span className="chatbot-sidebar-item-text">
+                    {session.title || "New Chat"}
+                  </span>
+                </button>
+              ))
 
           )}
         </div>
@@ -1950,29 +2705,29 @@ const Chatbot = () => {
 
                     })} */}
                     {Array.isArray(item.results) &&
-                    item.results.filter(Boolean).length > 0 ? (
+                      item.results.filter(Boolean).length > 0 ? (
 
                       item.results
                         .filter(Boolean)
                         .map((r, i) => {
 
-                          const key = `${msgIndex}-${i}`;
+                          //const key = `${msgIndex}-${i}`;
 
                           return (
-                           <ResultCardErrorBoundary
-                          key={`${sessionId}-${msgIndex}-${i}`}
-                        >
-                          <ResultCard
-                            r={r}
-                            i={i}
-                            isTyping={
-                              isTyping &&
-                              msgIndex ===
-                                conversation.length - 1
-                            }
-                            typingText={typingText}
-                          />
-                        </ResultCardErrorBoundary>
+                            <ResultCardErrorBoundary
+                              key={`${sessionId}-${msgIndex}-${i}`}
+                            >
+                              <ResultCard
+                                r={r}
+                                i={i}
+                                isTyping={
+                                  isTyping &&
+                                  msgIndex ===
+                                  conversation.length - 1
+                                }
+                                typingText={typingText}
+                              />
+                            </ResultCardErrorBoundary>
                           );
 
                         })
